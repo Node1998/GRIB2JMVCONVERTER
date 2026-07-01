@@ -2,7 +2,5 @@ flask>=3.0
 numpy>=1.24
 xarray>=2023.1
 cfgrib>=0.9.10
-gunicorn>=26.0.0
-# cfgrib pulls in eccodes (the C library). On Windows the reliable route is:
-#   conda install -c conda-forge eccodes cfgrib
-# pip's eccodes wheel also works on most platforms: pip install eccodes
+gunicorn>=21.2.0
+whitenoise>=6.6.0
