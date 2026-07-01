@@ -4,6 +4,9 @@ Local web tool that batch-converts GRIB2 model output into FNMOC JMV
 binary grid files, with a dark instrument-console UI and a live grid
 preview. Refined from the original Colab pipeline.
 
+
+## Try it here: https://grib2jmvconverter.onrender.com (We onnat render free tier so it takes a minute to load lmao)
+
 ## What changed from the notebook
 - **Per-parameter GRIB filtering.** Each product is read by its own eccodes
   `shortName` (`2t`, `msl`, `10u`, `10v`, `swh`, `mwp`, `mwd`, `gust`) instead
