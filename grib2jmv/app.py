@@ -7,7 +7,9 @@ import zipfile
 from flask import (Flask, jsonify, render_template, request,
                    send_file, abort)
 from werkzeug.utils import secure_filename
+from whitenoise import WhiteNoise
 import grib_to_jmv as g2j
+
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 UPLOADS = os.path.join(BASE, "uploads")
@@ -18,6 +20,8 @@ os.makedirs(UPLOADS, exist_ok=True)
 os.makedirs(OUTPUT, exist_ok=True)
 
 app = Flask(__name__)
+
+app.wsgi_app = WhiteNoise(app.wsgi_app, root='static/', prefix='static/')
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # Aligned with Render's 100MB proxy limit
 
 def _eccodes_ready() -> bool:
