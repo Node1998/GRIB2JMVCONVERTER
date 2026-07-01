@@ -34,6 +34,13 @@ os.makedirs(OUTPUT, exist_ok=True)
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB batch
 
+UPLOAD_FOLDER = 'uploads'  # Replace with your actual upload directory name
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+# Automatically create the folder if it does not exist
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
 # In-memory map: session token -> {"dir": ..., "files": [...], "jmv_dir": ...}
 SESSIONS: dict[str, dict] = {}
 
