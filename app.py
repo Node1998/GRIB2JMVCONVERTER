@@ -11,10 +11,15 @@ from whitenoise import WhiteNoise
 import grib_to_jmv as g2j
 
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(BASE)  # repo root: templates/ and static/ live here
+BASE    = os.path.dirname(os.path.abspath(__file__))
 UPLOADS = os.path.join(BASE, "uploads")
-OUTPUT = os.path.join(BASE, "output")
+OUTPUT  = os.path.join(BASE, "output")
+
+app = Flask(__name__)   # no template_folder/static_folder override — auto-detects
+
+app.wsgi_app = WhiteNoise(app.wsgi_app,
+                          root=os.path.join(BASE, "static"),
+                          prefix="static/")
 
 # Ensure base directories exist
 os.makedirs(UPLOADS, exist_ok=True)
