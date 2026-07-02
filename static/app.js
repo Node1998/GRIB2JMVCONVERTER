@@ -1,161 +1,237 @@
-from __future__ import annotations
+/* GRIB2 -> JMV  ·  client logic (vanilla, offline) */
+(() => {
+  "use strict";
 
-import os
-import shutil
-import uuid
-import zipfile
-from flask import (Flask, jsonify, render_template, request,
-                   send_file, abort)
-from werkzeug.utils import secure_filename
-from whitenoise import WhiteNoise
-import grib_to_jmv as g2j
+  const $ = (id) => document.getElementById(id);
+  const state = { token: null, files: [], activeFile: null, activeParam: null };
 
+  /* ---- engine status ---------------------------------------------- */
+  (function engine() {
+    const ready = document.body.dataset.eccodes === "ready";
+    const el = $("engineStatus");
+    el.classList.add(ready ? "ready" : "offline");
+    el.querySelector(".status-text").textContent = ready ? "engine ready" : "engine offline";
+  })();
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(BASE)  # repo root: templates/ and static/ live here
-UPLOADS = os.path.join(BASE, "uploads")
-OUTPUT = os.path.join(BASE, "output")
+  /* ---- drag + drop ------------------------------------------------- */
+  const dz = $("dropzone"), input = $("fileInput");
+  dz.addEventListener("click", () => input.click());
+  dz.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); }
+  });
+  ["dragenter", "dragover"].forEach((ev) =>
+    dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add("drag"); }));
+  ["dragleave", "drop"].forEach((ev) =>
+    dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove("drag"); }));
+  dz.addEventListener("drop", (e) => handleFiles(e.dataTransfer.files));
+  input.addEventListener("change", () => handleFiles(input.files));
 
-# Ensure base directories exist
-os.makedirs(UPLOADS, exist_ok=True)
-os.makedirs(OUTPUT, exist_ok=True)
+  function fmtSize(b) {
+    if (b > 1e9) return (b / 1e9).toFixed(2) + " GB";
+    if (b > 1e6) return (b / 1e6).toFixed(1) + " MB";
+    if (b > 1e3) return (b / 1e3).toFixed(0) + " KB";
+    return b + " B";
+  }
 
-app = Flask(__name__,
-            template_folder=os.path.join(ROOT, "templates"),
-            static_folder=os.path.join(ROOT, "static"))
+  async function handleFiles(fileList) {
+    const files = [...fileList];
+    if (!files.length) return;
+    setProgress("Scanning " + files.length + " file(s)…", 0.15, false);
 
-# absolute path: relative 'static/' broke when gunicorn's cwd wasn't repo root
-app.wsgi_app = WhiteNoise(app.wsgi_app, root=os.path.join(ROOT, "static"),
-                          prefix='static/')
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # Aligned with Render's 100MB proxy limit
+    const fd = new FormData();
+    files.forEach((f) => fd.append("files", f));
+    let data;
+    try {
+      data = await (await fetch("/api/upload", { method: "POST", body: fd })).json();
+    } catch (err) {
+      setProgress("Upload failed — is the server running?", 0, false);
+      return;
+    }
+    if (data.error) { setProgress(data.error, 0, false); return; }
 
-def _eccodes_ready() -> bool:
-    try:
-        import cfgrib  # noqa: F401
-        return True
-    except Exception:
-        return False
+    state.token = data.token;
+    state.files = data.files;
 
-@app.route("/")
-def index():
-    return render_template("index.html", eccodes=_eccodes_ready())
+    // file list
+    const fl = $("filelist");
+    fl.hidden = false;
+    fl.innerHTML = data.files
+      .map((f) => `<li><span>${f.name}</span><span class="fsize">${fmtSize(f.size)}</span></li>`)
+      .join("");
 
-@app.route("/api/upload", methods=["POST"])
-def upload():
-    """Receive GRIB2 files, store them, and report detected parameters."""
-    token = uuid.uuid4().hex[:12]
-    sess_dir = os.path.join(UPLOADS, token)
-    os.makedirs(sess_dir, exist_ok=True)
+    renderDetected(data.files, data.eccodes);
+    $("convertBtn").disabled = !data.eccodes;
+    setProgress(data.eccodes
+      ? `${data.files.length} file(s) ready — batch convert when set.`
+      : "Files staged. Install eccodes on the server to convert.", 0.25, false);
+  }
 
-    # Resilient search: checks 'files', 'file', or fallback to any file attached in the request
-    incoming = (
-        request.files.getlist("files") or 
-        request.files.getlist("file") or 
-        list(request.files.values())
-    )
+  function renderDetected(files, eccodes) {
+    const rows = $("paramRows"), count = $("paramCount");
+    if (!eccodes) {
+      rows.innerHTML = `<li class="param-empty">Engine offline — parameters can’t be scanned.</li>`;
+      count.textContent = "—";
+      return;
+    }
+    // union of params across all files
+    const seen = new Map();
+    files.forEach((f) => (f.params || []).forEach((p) => seen.set(p.key, p.title)));
+    if (!seen.size) {
+      rows.innerHTML = `<li class="param-empty">No known parameters found in these files.</li>`;
+      count.textContent = "0";
+      return;
+    }
+    count.textContent = seen.size;
+    rows.innerHTML = [...seen.values()]
+      .map((title) => `<li><span class="check">✓</span>${title}</li>`)
+      .join("");
+  }
 
-    if not incoming:
-        return jsonify(error="No files received"), 400
+  /* ---- batch convert ---------------------------------------------- */
+  $("convertBtn").addEventListener("click", async () => {
+    if (!state.token) return;
+    const btn = $("convertBtn");
+    btn.disabled = true;
+    btn.classList.add("busy");
+    btn.querySelector(".btn-label").textContent = "Converting…";
+    setProgress("Reading GRIB2 grids…", 0.45, false);
 
-    files_info = []
-    for fs in incoming:
-        if not fs or fs.filename == '':
-            continue
-        name = secure_filename(fs.filename) or "grib.bin"
-        path = os.path.join(sess_dir, name)
-        fs.save(path)
+    let data;
+    try {
+      data = await (await fetch("/api/convert", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: state.token }),
+      })).json();
+    } catch {
+      setProgress("Conversion request failed.", 0, false);
+      btn.disabled = false; btn.classList.remove("busy");
+      btn.querySelector(".btn-label").textContent = "Batch convert";
+      return;
+    }
 
-        params, err = [], None
-        if _eccodes_ready():
-            try:
-                params = g2j.detect_parameters(path)
-            except Exception as exc:
-                err = str(exc)
+    btn.classList.remove("busy");
+    btn.querySelector(".btn-label").textContent = "Batch convert";
+    btn.disabled = false;
 
-        files_info.append({
-            "name": name,
-            "size": os.path.getsize(path),
-            "params": params,
-            "error": err,
-        })
+    if (data.error) { setProgress(data.error, 0, false); return; }
 
-    return jsonify(token=token, files=files_info, eccodes=_eccodes_ready())
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    setProgress(`${stamp}_JMV — ${data.total} grid(s) written.`, 1, true);
+    $("exportBtn").disabled = data.total === 0;
+    $("shareBtn").disabled = data.total === 0;
 
-@app.route("/api/convert", methods=["POST"])
-def convert():
-    """Convert every uploaded file in the session to JMV and package them."""
-    if not _eccodes_ready():
-        return jsonify(error="eccodes/cfgrib not installed on the server. "
-                             "Install it to run conversions."), 503
+    buildChips();
+  });
 
-    token = (request.json or {}).get("token")
-    sess_dir = os.path.join(UPLOADS, str(token))
-    
-    # Stateless check: check if the session folder exists on disk
-    if not token or not os.path.isdir(sess_dir):
-        return jsonify(error="Unknown session token or upload expired"), 404
+  /* ---- parameter chips + preview ---------------------------------- */
+  function buildChips() {
+    const chips = $("chips");
+    // first file that actually has params
+    const file = state.files.find((f) => (f.params || []).length);
+    if (!file) return;
+    state.activeFile = file.name;
+    chips.innerHTML = file.params
+      .map((p) => `<button class="chip" data-key="${p.key}">${p.title}</button>`)
+      .join("");
+    chips.querySelectorAll(".chip").forEach((c) =>
+      c.addEventListener("click", () => selectParam(c.dataset.key, c)));
+    // auto-preview the first parameter
+    const first = chips.querySelector(".chip");
+    if (first) selectParam(first.dataset.key, first);
+  }
 
-    jmv_dir = os.path.join(OUTPUT, f"{token}_jmv")
-    if os.path.exists(jmv_dir):
-        shutil.rmtree(jmv_dir)
-    os.makedirs(jmv_dir, exist_ok=True)
+  async function selectParam(key, chipEl) {
+    document.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
+    chipEl.classList.add("active");
+    state.activeParam = key;
+    $("vizMeta").textContent = "loading…";
+    try {
+      const q = new URLSearchParams({ token: state.token, file: state.activeFile, param: key });
+      const grid = await (await fetch("/api/preview?" + q)).json();
+      if (grid.error) { $("vizMeta").textContent = grid.error; return; }
+      drawHeatmap(grid);
+    } catch {
+      $("vizMeta").textContent = "preview unavailable";
+    }
+  }
 
-    # Read uploaded files directly from disk
-    uploaded_files = [f for f in os.listdir(sess_dir) if os.path.isfile(os.path.join(sess_dir, f))]
+  /* ---- heatmap ----------------------------------------------------- */
+  const STOPS = [
+    [0.00, [11, 31, 36]],
+    [0.40, [14, 124, 123]],
+    [0.72, [79, 209, 197]],
+    [1.00, [242, 181, 68]],
+  ];
+  function ramp(t) {
+    t = Math.max(0, Math.min(1, t));
+    for (let i = 1; i < STOPS.length; i++) {
+      if (t <= STOPS[i][0]) {
+        const [t0, c0] = STOPS[i - 1], [t1, c1] = STOPS[i];
+        const f = (t - t0) / (t1 - t0 || 1);
+        return [0, 1, 2].map((j) => Math.round(c0[1][j] + (c1[1][j] - c0[1][j]) * f));
+      }
+    }
+    return STOPS[STOPS.length - 1][1];
+  }
 
-    total, results = 0, []
-    for name in uploaded_files:
-        src = os.path.join(sess_dir, name)
-        try:
-            written = g2j.convert_grib_to_jmv(src, jmv_dir)
-            total += len(written)
-            results.append({"file": name, "written": len(written)})
-        except Exception as exc:
-            results.append({"file": name, "written": 0, "error": str(exc)})
+  function drawHeatmap(grid) {
+    const { values, nx, ny, vmin, vmax, title } = grid;
+    $("vizIdle").style.display = "none";
+    $("vizMeta").textContent = `${title} · ${nx}×${ny}`;
 
-    return jsonify(token=token, total=total, results=results)
+    // render at native grid resolution, then scale up for a soft field
+    const off = document.createElement("canvas");
+    off.width = nx; off.height = ny;
+    const octx = off.getContext("2d");
+    const img = octx.createImageData(nx, ny);
+    const span = (vmax - vmin) || 1;
+    for (let i = 0; i < values.length; i++) {
+      const [r, g, b] = ramp((values[i] - vmin) / span);
+      img.data[i * 4] = r; img.data[i * 4 + 1] = g;
+      img.data[i * 4 + 2] = b; img.data[i * 4 + 3] = 255;
+    }
+    octx.putImageData(img, 0, 0);
 
-@app.route("/api/preview")
-def preview():
-    """Downsampled grid for the heatmap. ?token=&file=&param="""
-    if not _eccodes_ready():
-        return jsonify(error="eccodes not installed"), 503
+    const cv = $("vizCanvas");
+    const ctx = cv.getContext("2d");
+    cv.height = Math.round(cv.width * (ny / nx));
+    ctx.imageSmoothingEnabled = true;
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(off, 0, 0, cv.width, cv.height);
 
-    token = request.args.get("token")
-    fname = request.args.get("file")
-    param = request.args.get("param")
-    
-    sess_dir = os.path.join(UPLOADS, str(token))
-    if not token or not os.path.isdir(sess_dir):
-        return jsonify(error="Unknown session"), 404
+    // faint graticule overlay (echoes a chart grid without coastlines)
+    ctx.strokeStyle = "rgba(231,238,245,0.06)";
+    ctx.lineWidth = 1;
+    for (let gx = 1; gx < 12; gx++) {
+      const x = (gx / 12) * cv.width;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, cv.height); ctx.stroke();
+    }
+    for (let gy = 1; gy < 7; gy++) {
+      const y = (gy / 7) * cv.height;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(cv.width, y); ctx.stroke();
+    }
 
-    src = os.path.join(sess_dir, secure_filename(fname or ""))
-    if not os.path.exists(src):
-        return jsonify(error="File not found"), 404
+    const cb = $("colorbar");
+    cb.hidden = false;
+    cb.querySelector(".cb-min").textContent = vmin.toFixed(1);
+    cb.querySelector(".cb-max").textContent = vmax.toFixed(1);
+  }
 
-    try:
-        return jsonify(g2j.preview_grid(src, param))
-    except Exception as exc:
-        return jsonify(error=str(exc)), 400
+  /* ---- export + share --------------------------------------------- */
+  $("exportBtn").addEventListener("click", () => {
+    if (state.token) window.location = "/api/download/" + state.token;
+  });
+  $("shareBtn").addEventListener("click", () => {
+    setProgress("Package ready in /output — wire Share to Outlook/SharePoint here.", 1, true);
+  });
 
-@app.route("/api/download/<token>")
-def download(token):
-    """Zip the session's JMV output and stream it."""
-    sess_dir = os.path.join(UPLOADS, str(token))
-    jmv_dir = os.path.join(OUTPUT, f"{token}_jmv")
-    
-    if not os.path.isdir(sess_dir) or not os.path.isdir(jmv_dir):
-        abort(404)
-
-    zip_path = os.path.join(OUTPUT, f"JMV_Package_{token}.zip")
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, _dirs, files in os.walk(jmv_dir):
-            for f in files:
-                full = os.path.join(root, f)
-                zf.write(full, arcname=os.path.relpath(full, jmv_dir))
-
-    return send_file(zip_path, as_attachment=True,
-                     download_name=os.path.basename(zip_path))
-
-if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+  /* ---- progress strip --------------------------------------------- */
+  function setProgress(label, frac, done) {
+    const l = $("progLabel"), f = $("progFill");
+    l.textContent = label;
+    l.classList.toggle("done", !!done);
+    f.style.width = Math.round(frac * 100) + "%";
+    f.classList.toggle("done", !!done);
+  }
+})();
