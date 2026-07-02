@@ -12,6 +12,7 @@ import grib_to_jmv as g2j
 
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(BASE)  # repo root: templates/ and static/ live here
 UPLOADS = os.path.join(BASE, "uploads")
 OUTPUT = os.path.join(BASE, "output")
 
@@ -19,9 +20,13 @@ OUTPUT = os.path.join(BASE, "output")
 os.makedirs(UPLOADS, exist_ok=True)
 os.makedirs(OUTPUT, exist_ok=True)
 
-app = Flask(__name__)
+app = Flask(__name__,
+            template_folder=os.path.join(ROOT, "templates"),
+            static_folder=os.path.join(ROOT, "static"))
 
-app.wsgi_app = WhiteNoise(app.wsgi_app, root='static/', prefix='static/')
+# absolute path: relative 'static/' broke when gunicorn's cwd wasn't repo root
+app.wsgi_app = WhiteNoise(app.wsgi_app, root=os.path.join(ROOT, "static"),
+                          prefix='static/')
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # Aligned with Render's 100MB proxy limit
 
 def _eccodes_ready() -> bool:
