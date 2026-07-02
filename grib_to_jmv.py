@@ -196,15 +196,22 @@ def _open_param(grib_file_path: str, short_name: str):
     return ds, ds[var_names[0]]
 
 
-def detect_parameters(grib_file_path: str) -> list[dict]:
-    """Return the subset of PARAM_SPECS actually present in ``grib_file_path``."""
-    found = []
-    for key, spec in PARAM_SPECS.items():
-        opened = _open_param(grib_file_path, spec.grib_tag)
-        if opened is not None:
-            opened[0].close()
-            found.append({"key": key, "title": spec.product_title})
-    return found
+def detect_parameters(filepath):
+    """Detect GRIB2 parameters. Return (params_list, error_msg_or_None)."""
+    params = []
+    try:
+        with cfgrib.open_datasets(filepath) as dss:
+            for ds in dss:
+                params.extend(list(ds.data_vars.keys()))
+    except Exception as e:
+        error_msg = str(e)
+        if "Edition not supported" in error_msg:
+            return [], "File is not GRIB2 format (Edition 2). Check the file type."
+        elif "corrupted" in error_msg.lower():
+            return [], "File appears corrupted. Try re-downloading it."
+        else:
+            return [], f"Cannot read file: {error_msg}"
+    return params, None
 
 
 def _jmv_filename(spec: ParamSpec, da, lon_n: int, lat_n: int) -> str:
