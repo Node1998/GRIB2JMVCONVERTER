@@ -1,0 +1,41 @@
+# Render blueprint: always-on web service + 6-hourly cron self-curl trigger.
+# (Render cron jobs and web services can't share a persistent disk, so the
+#  cron container just pokes the web service, which owns the disk.)
+services:
+  - type: web
+    name: jmv-ingest
+    runtime: docker
+    plan: starter                 # always-on; needed for the self-curl pattern
+    disk:
+      name: jmv-data
+      mountPath: /data
+      sizeGB: 5
+    healthCheckPath: /health
+    envVars:
+      - key: JMV_DATA_DIR
+        value: /data/jmv
+      - key: ECMWF_MODEL
+        value: HRES
+      - key: MAX_FCST_HR
+        value: "72"
+      - key: STEP_INTERVAL
+        value: "6"
+      - key: RETENTION_HRS
+        value: "48"
+      - key: CRON_SECRET
+        generateValue: true       # Render injects a random secret
+
+  - type: cron
+    name: jmv-ingest-trigger
+    runtime: docker
+    schedule: "5 */6 * * *"       # :05 past every 6th hour, offset for data lag
+    dockerCommand: >
+      curl -fsS -X POST
+      -H "X-Cron-Secret: $CRON_SECRET"
+      https://jmv-ingest.onrender.com/cron/ingest
+    envVars:
+      - key: CRON_SECRET
+        fromService:
+          name: jmv-ingest
+          type: web
+          envVarKey: CRON_SECRET
